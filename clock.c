@@ -15,15 +15,16 @@
 
 volatile uint8_t g_ticks; // a tick is 1/100th of a second from timer1 compare interrupt A
 volatile uint8_t g_cur_digit;
-volatile uint8_t g_debounce_timer;
-volatile uint8_t g_debounce_port;
 
 uint32_t g_gps_time;
 uint32_t g_sys_time;
+
 uint8_t g_mode;
+uint8_t g_display;
 
 uint8_t g_rx_state, g_rx_ctr;
 uint8_t g_rx_buf[RX_BUF_SZ];
+
 
 uint8_t g_scan_order[] = {3,0,1,2}; // because why not?
 int8_t g_settings[] = {MODE_TIME_24,         // SET_DISP_MODE  Time display mode
@@ -55,7 +56,7 @@ void init_uart() {
 	UCSR0D = 0x00;
 }
 
-void set_clock_gps(uint32_t gps_tow) {
+void sync_gps_time(uint32_t gps_tow) {
 	g_gps_time = ((uint32_t)(gps_tow / 100.0) - DEFAULT_GPS_OFFSET) + (3600UL * g_settings[SET_GMT_OFFSET]);
 }
 
@@ -67,8 +68,8 @@ void set_clock_gps(uint32_t gps_tow) {
 /* http://gpsd.googlecode.com/files/SiRF-Royaltek.pdf                   */  
 /************************************************************************/
 void handle_uart_rx() {
-	cli();
 	uint8_t rx_byte = UDR0;
+	PORTB ^= _BV(LED_FRT);
 	switch(g_rx_state) {
 		case RX_IDLE:
 			// SIRF binary messages start with 0xA0 0xA2 ...
@@ -88,7 +89,8 @@ void handle_uart_rx() {
 			if(g_rx_buf[2] == 0x02) {
 				// We have a full buffer and it's a nav data packet! Yay!
 				// GPS TOW is bytes 26:29 in the stream, unpack em and update the GPS time global
-				set_clock_gps(((uint32_t)g_rx_buf[26] << 24) | ((uint32_t)g_rx_buf[27] << 16) | ((uint32_t)g_rx_buf[28] << 8) | g_rx_buf[29]);			
+				sync_gps_time(((uint32_t)g_rx_buf[26] << 24) | ((uint32_t)g_rx_buf[27] << 16) | ((uint32_t)g_rx_buf[28] << 8) | g_rx_buf[29]);			
+				
 			}				
 			g_rx_state = RX_IDLE;
 			g_rx_ctr = 0;
@@ -96,7 +98,7 @@ void handle_uart_rx() {
 		default:
 			break;
 	}
-	sei();
+	PORTB ^= _BV(LED_FRT);
 }
 
 void step_clock() {
@@ -149,7 +151,7 @@ void shift_hv(uint32_t data)
 {
 	for(uint8_t i = 0; i < 32; i++)
 	{
-		PORTC |= _BV(HV_CK);
+		PORTB |= _BV(HV_CK);
 		if(data << i & 0x80000000) {
 			PORTB |= _BV(HV_DI);
 		} 
@@ -158,9 +160,18 @@ void shift_hv(uint32_t data)
 		}
 		// 1.255 flicker glitch
 		_delay_us(1.75);
-		PORTC &= ~(_BV(HV_CK));
+		PORTB &= ~(_BV(HV_CK));
 		_delay_us(1.75);
 	}
+}
+
+uint8_t sample_switches() {
+	uint8_t sample = ((PINA & _BV(SW_INCR)) >> SW_INCR) << 3 |
+					 ((PINA & _BV(SW_DECR)) >> SW_DECR) << 2 |
+					 ((PINA & _BV(SW_ENTR)) >> SW_ENTR) << 1 |
+					 ((PINA & _BV(SW_MODE)) >> SW_MODE);
+	_delay_ms(50);
+	return ~(sample);
 }
 
 ISR(USART0__RX_vect) {
@@ -171,7 +182,7 @@ ISR(TIMER0_COMPA_vect) {
 	switch(g_mode) {
 		case OPR_MODE_RUN:
 			display(g_scan_order[g_cur_digit++], render_time(g_gps_time, _BV(FLAG_RENDER_12)));
-			//display(g_scan_order[g_cur_digit++], g_debounce_port);
+			//display(g_scan_order[g_cur_digit++], g_display);
 			break;
 		case OPR_MODE_CONF:
 			//display_conf(g_scan_order[g_cur_digit++], (uint16_t g_conf_item << 8) | g_conf_val);
@@ -187,23 +198,14 @@ ISR(TIMER1_COMPA_vect) {
 
 }
 
-ISR(PCINT0_vect) {
-	uint8_t switches = ~((PINA & _BV(SW_DECR)) << 3) | ~((PINA & _BV(SW_INCR)) << 2) | ~((PINB & _BV(SW_MODE)) << 1) | ~(PINC & _BV(SW_ENTR));
-	g_debounce_port = switches;
-	
-}
-
 int main(void)
 {
 	DDRA = _BV(LED_RED) | _BV(LED_YEL);
-	DDRB = _BV(HV_DI);
-	DDRC = _BV(HV_CK) | _BV(HV_OE) | _BV(HV_ST);
-	PORTA = 0x00;
-	PORTB = 0x00;
+	DDRB = _BV(HV_DI) | _BV(HV_CK) | _BV(LED_FRT);
+	DDRC = _BV(HV_OE) | _BV(HV_ST);
+
 	PORTC = _BV(HV_ST);
-	PUEA = _BV(SW_INCR) | _BV(SW_DECR);
-	PUEB = _BV(SW_MODE);
-	PUEC = _BV(SW_ENTR);
+	PUEA = _BV(SW_INCR) | _BV(SW_DECR) | _BV(SW_ENTR) | _BV(SW_MODE);
 	
 	TCCR0A = 0x00;
 	TCCR0B = 0x0B;
@@ -215,17 +217,31 @@ int main(void)
 	
 	TIMSK |= _BV(OCF1A) | _BV(OCF0A);
 
-	PCMSK0 |= _BV(PCINT2) | _BV(PCINT3);
-	PCMSK1 |= _BV(PCINT11);
-	PCMSK2 |= _BV(PCINT12);
+	//PCMSK0 |= _BV(PCINT2) | _BV(PCINT3);
+	//PCMSK1 |= _BV(PCINT11);
+	//PCMSK2 |= _BV(PCINT12);
 	
-	GIMSK |= _BV(PCIE0) | _BV(PCIE1) | _BV(PCIE2);
+	//GIMSK |= _BV(PCIE0) | _BV(PCIE1) | _BV(PCIE2);
 	
 	init_uart();
+	
+	// reset the GPS
 	PORTA |= _BV(PA5);
 	_delay_ms(1000);
 	PORTA &= ~(_BV(PA5));
+	
+	// enable interrupts
 	sei();
 	
-    while(1) { /* wait for interrupts! */ }
+	uint8_t sw, psw;
+    while(1) {
+		sw = sample_switches();
+		/*
+		switch(sw) {
+			default:
+				g_display = bin_to_bcd(sw & 0x0F);
+				break;
+		}
+		*/
+	}
 }

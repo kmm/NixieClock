@@ -9,16 +9,17 @@
 #ifndef MAIN_H_
 #define MAIN_H_
 
-#define HV_CK PC1
+#define HV_CK PB1
 #define HV_DI PB2
 #define HV_ST PC4
 #define HV_OE PC5
 
 #define LED_RED PA0
 #define LED_YEL PA1
+#define LED_FRT PB3
 
-#define SW_MODE PB3
-#define SW_ENTR PC0
+#define SW_MODE PA6
+#define SW_ENTR PA4
 #define SW_INCR PA3
 #define SW_DECR PA2
 
